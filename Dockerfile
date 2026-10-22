@@ -8,6 +8,7 @@ WORKDIR /opt
 COPY crispasr/ /opt/CrispASR/
 RUN cd /opt/CrispASR \
  && cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=OFF -DGGML_OPENMP=ON -DCRISPASR_BUILD_TESTS=OFF \
+   -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF \
  && cmake --build build -j"$(nproc)" \
  && mkdir -p /out/bin /out/lib \
  && cp build/bin/crispasr /out/bin/ \
