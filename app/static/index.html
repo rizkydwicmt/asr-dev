@@ -18,6 +18,10 @@
   button:disabled { opacity: .5; cursor: wait; }
   label.chk { display: block; margin: 12px 0; font-size: 14px; color: #9aa4b2; }
   #status { margin: 14px 0; font-size: 14px; color: #9aa4b2; min-height: 18px; }
+  #bar { height: 6px; background: #262b36; border-radius: 4px; overflow: hidden; display: none; margin-top: 8px; }
+  #bar > div { height: 100%; width: 40%; background: #4f8cff; border-radius: 4px;
+    animation: slide 1.2s ease-in-out infinite alternate; }
+  @keyframes slide { from { margin-left: 0; } to { margin-left: 60%; } }
   pre { background: #0b0d11; border: 1px solid #262b36; border-radius: 8px; padding: 14px;
         white-space: pre-wrap; font-size: 13px; max-height: 420px; overflow: auto; }
   .row { display: flex; gap: 12px; margin-top: 10px; }
@@ -28,7 +32,7 @@
 <body>
 <main>
   <h1>🎙️ ASR Dev — Whisper turbo + VAD + Sortformer</h1>
-  <small class="hint">CrispASR · bahasa: id · diarization: sortformer · format: ogg / wav / mp3 / m4a / flac</small>
+  <small class="hint">CrispASR · bahasa: id · diarization: sortformer · format: ogg / wav / mp3 / m4a / flac · job aman di-reload</small>
 
   <div class="card" style="margin-top:14px">
     <form id="f">
@@ -38,6 +42,7 @@
       </div>
       <label class="chk"><input type="checkbox" id="diarize" checked> Diarization (siapa ngomong kapan — sortformer)</label>
       <input type="submit" value="Transcribe" id="go" disabled>
+      <div id="bar"><div></div></div>
       <div id="status"></div>
     </form>
   </div>
@@ -47,6 +52,7 @@
     <pre id="text"></pre>
     <div class="row">
       <a class="dl" id="dlSrt" download="transcript.srt">⬇️ Download .srt</a>
+      <small class="hint" id="jmeta"></small>
     </div>
     <details style="margin-top:10px"><summary style="cursor:pointer;color:#9aa4b2">Lihat SRT mentah</summary>
       <pre id="srt"></pre>
@@ -55,10 +61,9 @@
 </main>
 
 <script>
-const drop = document.getElementById('drop'), fi = document.getElementById('file'),
-      go = document.getElementById('go'), st = document.getElementById('status'),
-      res = document.getElementById('result');
-let picked = null;
+const $ = id => document.getElementById(id);
+const drop = $('drop'), fi = $('file'), go = $('go'), st = $('status'), bar = $('bar');
+let picked = null, timer = null, elapsed = 0;
 
 drop.onclick = () => fi.click();
 drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
@@ -69,33 +74,63 @@ fi.onchange = () => pick(fi.files[0]);
 function pick(f) {
   if (!f) return;
   picked = f;
-  document.getElementById('fname').textContent = f.name + ' — ' + (f.size/1048576).toFixed(1) + ' MB';
+  $('fname').textContent = f.name + ' — ' + (f.size/1048576).toFixed(1) + ' MB';
   go.disabled = false;
 }
 
-document.getElementById('f').onsubmit = async e => {
+const fmt = s => String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+
+// resume polling kalau ada job pending dari reload sebelumnya
+const lastJob = localStorage.getItem('asr_job');
+if (lastJob) { localStorage.removeItem('asr_job'); poll(lastJob); }
+
+$('f').onsubmit = async e => {
   e.preventDefault();
   if (!picked) return;
   const fd = new FormData();
   fd.append('file', picked);
-  fd.append('diarize', document.getElementById('diarize').checked);
-  go.disabled = true;
-  st.textContent = '⏳ Memproses… (audio 1 menit ≈ 20-30 detik proses di CPU)';
-  res.style.display = 'none';
+  fd.append('diarize', $('diarize').checked);
+  go.disabled = true; bar.style.display = 'block';
+  st.textContent = '⬆️ Mengunggah…';
   try {
     const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
     const j = await r.json();
-    if (!r.ok) { st.textContent = '❌ ' + (j.detail || r.statusText); go.disabled = false; return; }
-    st.textContent = '✅ Selesai — job ' + j.job_id;
-    document.getElementById('text').textContent = j.transcript;
-    document.getElementById('srt').textContent = j.srt;
-    document.getElementById('dlSrt').href = j.srt_url;
-    res.style.display = 'block';
-  } catch (err) {
-    st.textContent = '❌ ' + err.message;
-  }
-  go.disabled = false;
+    if (!r.ok) { fail('❌ ' + (j.detail || r.statusText)); return; }
+    st.textContent = '⏳ Memproses… (job ' + j.job_id + ')';
+    poll(j.job_id);
+  } catch (err) { fail('❌ ' + err.message); }
 };
+
+function poll(job) {
+  // simpan job_id → kalau halaman di-reload, polling bisa dilanjutkan
+  localStorage.setItem('asr_job', job);
+  elapsed = 0;
+  st.textContent = '⏳ Memproses… 00:00';
+  timer = setInterval(async () => {
+    elapsed++;
+    st.textContent = '⏳ Memproses… ' + fmt(elapsed) + ' (audio panjang ≈ 1-2.5x durasinya)';
+    try {
+      const r = await fetch('/api/jobs/' + job);
+      if (r.status === 404) return; // pod mungkin restart — coba lagi nanti
+      const s = await r.json();
+      if (s.status === 'done') { clearInterval(timer); localStorage.removeItem('asr_job'); done(job, s); }
+      if (s.status === 'error') { clearInterval(timer); localStorage.removeItem('asr_job'); fail('❌ ' + (s.error || 'gagal')); }
+    } catch (_) { /* jaringan glodak — coba lagi di tick berikutnya */ }
+  }, 4000);
+}
+
+function done(job, s) {
+  bar.style.display = 'none';
+  st.textContent = '✅ Selesai dalam ' + fmt(elapsed) + ' — job ' + job;
+  $('text').textContent = s.transcript;
+  $('srt').textContent = s.srt;
+  $('dlSrt').href = s.srt_url;
+  $('jmeta').textContent = 'durasi proses: ' + fmt(elapsed);
+  $('result').style.display = 'block';
+  go.disabled = false;
+}
+
+function fail(msg) { bar.style.display = 'none'; st.textContent = msg; go.disabled = false; }
 </script>
 </body>
 </html>

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 
@@ -24,6 +25,51 @@ MAX_UPLOAD = int(os.getenv("ASR_MAX_UPLOAD_MB", "200"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="ASR Dev", version="dev")
 
+# registry job in-memory (dev) — status + hasil
+JOBS: dict[str, dict] = {}
+
+
+def _read(p: Path) -> str:
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+
+
+def _run_job(job_id: str, cmd: list[str]):
+    """Jalan di thread background — crispasr proses, hasil ditandai lewat out.txt."""
+    JOBS[job_id]["status"] = "processing"
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+        if proc.returncode != 0:
+            JOBS[job_id].update(status="error", error=(proc.stderr or proc.stdout)[-800:])
+            return
+        text = _read(WORK_DIR / job_id / "out.txt")
+        if not text.strip():
+            JOBS[job_id].update(status="error", error="output kosong")
+            return
+        JOBS[job_id].update(
+            status="done", transcript=text.strip(), srt=_read(WORK_DIR / job_id / "out.srt")
+        )
+    except subprocess.TimeoutExpired:
+        JOBS[job_id].update(status="error", error=f"timeout >{TIMEOUT}s")
+    except Exception as e:  # pragma: no cover
+        JOBS[job_id].update(status="error", error=str(e))
+
+
+def _build_cmd(job_id: str, src: Path, diarize: bool) -> list[str]:
+    cmd = [
+        CRISPASR,
+        "--model", MODEL,
+        "--file", str(src),
+        "-l", "id",
+        "-mc", "0", "-sns",
+        "-et", "2.2", "-lpt", "-1.0", "-nth", "0.6", "-bs", "5",
+        "--prompt", PROMPT, "--carry-initial-prompt",
+        "--vad", "--vad-model", VAD_MODEL,
+    ]
+    if diarize:
+        cmd += ["--diarize", "--diarize-method", "sortformer", "--diarize-model", DIARIZE_MODEL]
+    cmd += ["-otxt", "-osrt", "-of", str(WORK_DIR / job_id / "out")]
+    return cmd
+
 
 @app.get("/api/health")
 def health():
@@ -37,16 +83,11 @@ def health():
     return {"status": "ok", "crispasr": (v.stdout or v.stderr).strip()}
 
 
-def _read(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
-
-
-# PENTING: sync def (bukan async) → FastAPI jalanin di threadpool → event loop
-# tetep hidup selama crispasr proses (request lain & probe gak beku)
 @app.post("/api/transcribe")
 def transcribe(
     file: UploadFile = File(...),
     diarize: bool = Form(True),
+    wait: bool = Form(False),  # true = mode lama (blok sampai beres; buat curl)
 ):
     if (file.size or 0) > MAX_UPLOAD * 1024 * 1024:
         raise HTTPException(413, f"file > {MAX_UPLOAD}MB")
@@ -56,48 +97,61 @@ def transcribe(
         raise HTTPException(415, f"format {ext} tidak didukung; pakai ogg/wav/mp3/m4a/flac")
 
     job = uuid.uuid4().hex[:12]
-    job_dir = WORK_DIR / job
-    job_dir.mkdir()
-    src = job_dir / f"input{ext}"
+    (WORK_DIR / job).mkdir()
+    src = WORK_DIR / job / f"input{ext}"
     src.write_bytes(file.file.read())
 
-    prefix = str(job_dir / "out")
-    cmd = [
-        CRISPASR,
-        "--model", MODEL,
-        "--file", str(src),
-        "-l", "id",
-        "-mc", "0", "-sns",
-        "-et", "2.2", "-lpt", "-1.0", "-nth", "0.6", "-bs", "5",
-        "--prompt", PROMPT, "--carry-initial-prompt",
-        "--vad", "--vad-model", VAD_MODEL,
-    ]
-    if diarize:
-        cmd += ["--diarize", "--diarize-method", "sortformer", "--diarize-model", DIARIZE_MODEL]
-    cmd += ["-otxt", "-osrt", "-of", prefix]
+    JOBS[job] = {"status": "queued"}
+    cmd = _build_cmd(job, src, diarize)
+    threading.Thread(target=_run_job, args=(job, cmd), daemon=True).start()
 
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, f"transcribe timeout >{TIMEOUT}s")
-    if proc.returncode != 0:
-        raise HTTPException(500, f"crispasr gagal: {proc.stderr[-800:]}")
+    if wait:  # mode kompatibel (curl): blok sampai selesai
+        import time
+        while JOBS[job]["status"] in ("queued", "processing"):
+            time.sleep(2)
+        j = JOBS[job]
+        if j["status"] == "error":
+            raise HTTPException(500, j["error"])
+        return JSONResponse(
+            {
+                "job_id": job,
+                "filename": file.filename,
+                "diarize": diarize,
+                "transcript": j["transcript"],
+                "srt": j["srt"],
+                "srt_url": f"/api/jobs/{job}/srt",
+            }
+        )
 
-    text = _read(Path(prefix + ".txt"))
-    srt = _read(Path(prefix + ".srt"))
-    if not text.strip():
-        raise HTTPException(500, "output kosong")
-
+    # mode default: langsung balik job_id — client polling
     return JSONResponse(
-        {
+        {"job_id": job, "status": "queued", "poll_url": f"/api/jobs/{job}"}
+    )
+
+
+@app.get("/api/jobs/{job}")
+def job_status(job: str):
+    j = JOBS.get(job)
+    if j:
+        resp = {"job_id": job, "status": j["status"]}
+        if j["status"] == "done":
+            resp.update(
+                transcript=j["transcript"], srt=j["srt"], srt_url=f"/api/jobs/{job}/srt"
+            )
+        elif j["status"] == "error":
+            resp["error"] = j["error"]
+        return resp
+    # fallback: job dibuat sebelum pod restart — cek file langsung
+    d = WORK_DIR / job
+    if (d / "out.txt").exists():
+        return {
             "job_id": job,
-            "filename": file.filename,
-            "diarize": diarize,
-            "transcript": text.strip(),
-            "srt": srt,
+            "status": "done",
+            "transcript": _read(d / "out.txt").strip(),
+            "srt": _read(d / "out.srt"),
             "srt_url": f"/api/jobs/{job}/srt",
         }
-    )
+    raise HTTPException(404, "job tidak ditemukan")
 
 
 @app.get("/api/jobs/{job}/srt")
@@ -106,13 +160,6 @@ def job_srt(job: str):
     if not p.exists():
         raise HTTPException(404, "job tidak ditemukan")
     return PlainTextResponse(p.read_text(encoding="utf-8", errors="replace"), media_type="text/plain")
-
-
-@app.get("/api/jobs/{job}/audio-original")
-def job_audio(job: str):
-    for f in (WORK_DIR / job).glob("input.*"):
-        return FileResponse(f)
-    raise HTTPException(404, "job tidak ditemukan")
 
 
 app.mount("/", StaticFiles(directory="/opt/app/static", html=True), name="ui")
