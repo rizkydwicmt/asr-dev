@@ -1,0 +1,46 @@
+name: build-amd64
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone CrispASR
+        run: |
+          git clone --depth 1 https://github.com/CrispStrobe/CrispASR crispasr
+          rm -rf crispasr/build crispasr/.git
+
+      - name: Download models (publik)
+        run: |
+          mkdir -p models
+          curl -fL --retry 3 -o models/ggml-large-v3-turbo.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+          curl -fL --retry 3 -o models/ggml-silero-v6.2.0.bin \
+            "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
+          curl -fL --retry 3 -o models/pyannote-seg-3.0.gguf \
+            "https://huggingface.co/cstr/pyannote-v3-segmentation-GGUF/resolve/main/pyannote-seg-3.0.gguf"
+          curl -fL --retry 3 -o models/titanet-large.gguf \
+            "https://huggingface.co/cstr/titanet-large-GGUF/resolve/main/titanet-large.gguf"
+          curl -fL --retry 3 -o models/Nemotron-3-Diarization.q8_0.gguf \
+            "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/Nemotron-3-Diarization.q8_0.gguf"
+          ls -lh models/
+
+      - name: Build image (linux/amd64, native runner)
+        run: |
+          docker build -t asr-dev:dev .
+          docker save asr-dev:dev | gzip > image.tar.gz
+          ls -lh image.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asr-dev-image
+          path: image.tar.gz
+          retention-days: 1
+          compression-level: 0

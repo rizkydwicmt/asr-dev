@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASR Dev — Upload & Transcribe</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
+  main { max-width: 860px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 20px; }
+  .card { background: #171a21; border: 1px solid #262b36; border-radius: 12px; padding: 20px; }
+  #drop { border: 2px dashed #39414f; border-radius: 10px; padding: 36px; text-align: center; cursor: pointer; }
+  #drop.over { border-color: #4f8cff; background: #1a2130; }
+  input[type=submit], button { background: #2563eb; border: 0; color: #fff; padding: 10px 18px;
+    border-radius: 8px; font-size: 14px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  label.chk { display: block; margin: 12px 0; font-size: 14px; color: #9aa4b2; }
+  #status { margin: 14px 0; font-size: 14px; color: #9aa4b2; min-height: 18px; }
+  pre { background: #0b0d11; border: 1px solid #262b36; border-radius: 8px; padding: 14px;
+        white-space: pre-wrap; font-size: 13px; max-height: 420px; overflow: auto; }
+  .row { display: flex; gap: 12px; margin-top: 10px; }
+  a.dl { color: #4f8cff; font-size: 13px; }
+  small.hint { color: #6b7280; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎙️ ASR Dev — Whisper turbo + VAD + Sortformer</h1>
+  <small class="hint">CrispASR · bahasa: id · diarization: sortformer · format: ogg / wav / mp3 / m4a / flac</small>
+
+  <div class="card" style="margin-top:14px">
+    <form id="f">
+      <div id="drop">Klik atau drag & drop file audio ke sini
+        <input id="file" type="file" accept=".ogg,.wav,.mp3,.m4a,.flac" hidden>
+        <div style="margin-top:8px"><small class="hint" id="fname"></small></div>
+      </div>
+      <label class="chk"><input type="checkbox" id="diarize" checked> Diarization (siapa ngomong kapan — sortformer)</label>
+      <input type="submit" value="Transcribe" id="go" disabled>
+      <div id="status"></div>
+    </form>
+  </div>
+
+  <div class="card" id="result" style="display:none; margin-top:16px">
+    <h1 style="margin-top:0">Transkrip</h1>
+    <pre id="text"></pre>
+    <div class="row">
+      <a class="dl" id="dlSrt" download="transcript.srt">⬇️ Download .srt</a>
+    </div>
+    <details style="margin-top:10px"><summary style="cursor:pointer;color:#9aa4b2">Lihat SRT mentah</summary>
+      <pre id="srt"></pre>
+    </details>
+  </div>
+</main>
+
+<script>
+const drop = document.getElementById('drop'), fi = document.getElementById('file'),
+      go = document.getElementById('go'), st = document.getElementById('status'),
+      res = document.getElementById('result');
+let picked = null;
+
+drop.onclick = () => fi.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); pick(e.dataTransfer.files[0]); };
+fi.onchange = () => pick(fi.files[0]);
+
+function pick(f) {
+  if (!f) return;
+  picked = f;
+  document.getElementById('fname').textContent = f.name + ' — ' + (f.size/1048576).toFixed(1) + ' MB';
+  go.disabled = false;
+}
+
+document.getElementById('f').onsubmit = async e => {
+  e.preventDefault();
+  if (!picked) return;
+  const fd = new FormData();
+  fd.append('file', picked);
+  fd.append('diarize', document.getElementById('diarize').checked);
+  go.disabled = true;
+  st.textContent = '⏳ Memproses… (audio 1 menit ≈ 20-30 detik proses di CPU)';
+  res.style.display = 'none';
+  try {
+    const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) { st.textContent = '❌ ' + (j.detail || r.statusText); go.disabled = false; return; }
+    st.textContent = '✅ Selesai — job ' + j.job_id;
+    document.getElementById('text').textContent = j.transcript;
+    document.getElementById('srt').textContent = j.srt;
+    document.getElementById('dlSrt').href = j.srt_url;
+    res.style.display = 'block';
+  } catch (err) {
+    st.textContent = '❌ ' + err.message;
+  }
+  go.disabled = false;
+};
+</script>
+</body>
+</html>
