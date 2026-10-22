@@ -29,9 +29,12 @@ app = FastAPI(title="ASR Dev", version="dev")
 def health():
     try:
         v = subprocess.run([CRISPASR, "--version"], capture_output=True, text=True, timeout=15)
-        return {"status": "ok", "crispasr": v.stdout.strip() or v.stderr.strip()}
     except Exception as e:  # pragma: no cover
         raise HTTPException(503, f"crispasr not healthy: {e}")
+    if v.returncode != 0:
+        # jujur: binary rusak/library hilang → 503, bukan 200 dengan pesan error
+        raise HTTPException(503, f"crispasr broken: {(v.stderr or v.stdout).strip()[:300]}")
+    return {"status": "ok", "crispasr": (v.stdout or v.stderr).strip()}
 
 
 def _read(p: Path) -> str:
