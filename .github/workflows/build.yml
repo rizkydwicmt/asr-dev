@@ -13,7 +13,7 @@ jobs:
 
       - name: Clone CrispASR
         run: |
-          git clone --depth 1 https://github.com/CrispStrobe/CrispASR crispasr
+          git clone --depth 1 --recursive https://github.com/CrispStrobe/CrispASR crispasr
           rm -rf crispasr/build crispasr/.git
 
       - name: Download models (publik)
