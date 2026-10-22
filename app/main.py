@@ -12,6 +12,7 @@ CRISPASR = os.getenv("CRISPASR_BIN", "/usr/local/bin/crispasr")
 MODEL = os.getenv("ASR_MODEL", "/models/ggml-large-v3-turbo.bin")
 VAD_MODEL = os.getenv("ASR_VAD_MODEL", "/models/ggml-silero-v6.2.0.bin")
 DIARIZE_MODEL = os.getenv("ASR_DIARIZE_MODEL", "/models/Nemotron-3-Diarization.q8_0.gguf")
+THREADS = os.getenv("ASR_THREADS", "6")  # samakan dengan limits.cpu di values
 PROMPT = os.getenv(
     "ASR_PROMPT",
     "Telepon call center. Percakapan bahasa Indonesia sehari-hari. "
@@ -60,6 +61,7 @@ def _build_cmd(job_id: str, src: Path, diarize: bool) -> list[str]:
         "--model", MODEL,
         "--file", str(src),
         "-l", "id",
+        "-t", THREADS,
         "-mc", "0", "-sns",
         "-et", "2.2", "-lpt", "-1.0", "-nth", "0.6", "-bs", "5",
         "--prompt", PROMPT, "--carry-initial-prompt",
