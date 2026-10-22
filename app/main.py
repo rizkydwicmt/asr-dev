@@ -41,8 +41,10 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
+# PENTING: sync def (bukan async) → FastAPI jalanin di threadpool → event loop
+# tetep hidup selama crispasr proses (request lain & probe gak beku)
 @app.post("/api/transcribe")
-async def transcribe(
+def transcribe(
     file: UploadFile = File(...),
     diarize: bool = Form(True),
 ):
@@ -57,7 +59,7 @@ async def transcribe(
     job_dir = WORK_DIR / job
     job_dir.mkdir()
     src = job_dir / f"input{ext}"
-    src.write_bytes(await file.read())
+    src.write_bytes(file.file.read())
 
     prefix = str(job_dir / "out")
     cmd = [
